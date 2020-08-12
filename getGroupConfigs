@@ -1,0 +1,206 @@
+#!/bin/env python3
+
+import requests
+import json
+import hashlib
+import base64
+import time
+import hmac
+import argparse
+import os 
+import logging
+from datetime import datetime
+
+#Logging
+def log_msg(msg, severity = "INFO", end = "\n", crb = False):
+    if (severity == "DEBUG" and debug) or (severity == "INFO" and info) or severity not in ("DEBUG", "INFO"):
+        print(f"{datetime.now().strftime('[%Y-%m-%d %H:%M:%S]')} {severity}: {msg}", end=end)
+
+#LM Auth & Headers
+def makeHeaders(_httpVerb,_data,_resourcePath,_url):
+    #Get current time in milliseconds
+    epoch = str(int(time.time() * 1000))
+
+    #Concatenate Request details
+    requestVars = _httpVerb + epoch + _data + _resourcePath
+
+    #Construct signature
+    authCode = hmac.new(AccessKey.encode(),msg=requestVars.encode(),digestmod=hashlib.sha256).hexdigest()
+    signature = base64.b64encode(authCode.encode())
+    #Construct headers
+    auth = 'LMv1 ' + AccessId + ':' + signature.decode() + ':' + epoch
+    headers = {'Content-Type':'multipart/form-data','Authorization':auth,}
+
+    #Make request
+    response = requests.get(_url, data=_data, headers=headers)
+    return response
+
+#Get devices in group
+def devicesInGroup():
+
+    log_msg("Gathering devices in the group")
+    #Request Info
+    httpVerb ='GET'
+    resourcePath = '/device/groups/' + groupId + '/devices'
+    queryParams = ''
+    data = ''
+    
+    #Construct URL 
+    url = 'https://'+ Company +'.logicmonitor.com/santaba/rest' + resourcePath + queryParams
+    
+    response = makeHeaders(httpVerb,data,resourcePath,url)
+    return_dict = {'code':response.status_code,
+    	       'body':response.content}
+    log_msg(f"Response code: {return_dict['code']}")
+ 
+    json_dict = json.loads(return_dict['body'])['data']
+    log_msg(f"Response body: {json_dict}", "DEBUG")
+    items = json_dict['items']
+    devices = {}
+    for item in items:
+        devices.update({item['displayName']: {'name': item['name'], 'id': item['id']}})
+    return devices
+
+#Find configuration datasource
+def deviceDatasources(_deviceId):
+    log_msg("Gathering datasources")
+    httpVerb ='GET'
+    resourcePath = '/device/devices/' + str(_deviceId) + '/devicedatasources'
+    queryParams = '?size=1000'
+    data = ''
+
+    #Construct URL
+    url = 'https://'+ Company +'.logicmonitor.com/santaba/rest' + resourcePath + queryParams
+    response = makeHeaders(httpVerb,data,resourcePath,url)
+    return_dict = {'code':response.status_code,
+               'body':response.content}
+    json_dict = json.loads(return_dict['body'])['data']
+    dataSources = json_dict['items']
+    log_msg(f"Datasources: {dataSources}", "DEBUG")
+
+    dsId = False 
+    for ds in dataSources:
+        if ds['dataSourceName'] in ds_list:
+            dsId = ds['id']
+            break
+    if not dsId:        
+        devices_without_datasource.append(device)
+        log_msg(f"{device} has no matching datasource")
+    return dsId
+
+#Find configuration instance
+def deviceDsInstances(_deviceId,_dsId):
+    log_msg("Gathering datasource instances")
+    httpVerb ='GET'
+    resourcePath = '/device/devices/' + str(_deviceId) + '/devicedatasources/' + str(_dsId) + '/instances'
+    queryParams = ''
+    data = ''
+
+    #Construct URL
+    url = 'https://'+ Company +'.logicmonitor.com/santaba/rest' + resourcePath + queryParams
+    response = makeHeaders(httpVerb,data,resourcePath,url)
+    return_dict = {'code':response.status_code,
+               'body':response.content}
+
+    json_dict = json.loads(return_dict['body'])['data']
+
+    instances = json_dict['items']
+    log_msg(f"Instances: {instances}", "DEBUG")
+
+    instanceId = False
+    for instance in instances:
+        if instance['displayName'] in in_list:
+            instanceId = instance['id']
+            break
+    if not instanceId:
+        devices_without_instance.append(device)
+        log_msg(f"{device} has no matching instance")
+
+    return instanceId
+
+#Get config and write to file
+def deviceConfig(_deviceId,_dsId,_instanceId):
+    log_msg("Gathering configuration")
+    httpVerb ='GET'
+    resourcePath = '/device/devices/' + str(_deviceId) + '/devicedatasources/' + str(_dsId) + '/instances/' + str(_instanceId) + '/config'
+    queryParams = ''
+    data = ''
+
+    #Construct URL
+    url = 'https://'+ Company +'.logicmonitor.com/santaba/rest' + resourcePath + queryParams
+    response = makeHeaders(httpVerb,data,resourcePath,url)
+    return_dict = {'code':response.status_code,
+               'body':response.content}
+
+    json_dict = json.loads(return_dict['body'])['data']
+
+    config = 'NONE'
+    if json_dict.get('items'):
+        configItems = json_dict['items']
+        config = configItems[0]['config']
+    return config
+
+#Parse Arguments
+parser=argparse.ArgumentParser()
+parser.add_argument('--gid', help='LM deviceGroupId for group containing devices')
+parser.add_argument('--file', help='Path to file containing API Credentials')
+parser.add_argument('--folder', help='Path or folder for config files. Defaults to cwd.')
+parser.add_argument('--debug', help='Turns on very verbose output.', action='store_true')
+parser.add_argument('--info', help='Turns on information messages (these may or may not indicate a problem).', action='store_true')
+args = parser.parse_args()
+groupId = args.gid
+folder_path = args.folder
+debug = args.debug
+info = args.info
+
+#Get Account Access Info
+keyFilePath = args.file
+with open(keyFilePath) as file:
+    fileText = file.read()
+
+keyFileJson = json.loads(fileText)
+AccessId = keyFileJson['lm_id']
+AccessKey = keyFileJson['lm_key']
+Company = keyFileJson['lm_company']
+
+#Set folder path
+if not folder_path:
+    folder_path = os.getcwd()
+
+# CREATE CONTAINERS FOR RESULTS
+devices_without_datasource = []
+devices_without_instance = []
+
+#Lists 
+ds_list = ['Running_vs_Startup_configs','Cisco_IOS','Cisco_NXOS','PaloAlto_FW_CLIConfigs']
+in_list = ['running-config','Cisco_IOS','running']
+
+log_msg("START SCRIPT EXECUTION")
+
+# CREATE CONFIG FOLDER
+if folder_path:
+    if not os.path.exists(folder_path):
+        os.makedirs(folder_path)
+
+devices = devicesInGroup()
+#loop to retrieve resource configurations
+for device in devices:
+    log_msg(f"Gathering information for {device}...")
+    deviceId = devices[device]['id']
+    dsId = deviceDatasources(deviceId)
+    if dsId:
+        instanceId = deviceDsInstances(deviceId,dsId)
+        if instanceId:
+            config_file = device + ".txt"
+            path = os.path.join(folder_path, config_file)
+            config = deviceConfig(deviceId,dsId,instanceId)
+            with open(path, 'w') as f:
+                f.write(config)
+            f.close()
+#    log_msg(f"CONFIG: {config}", "DEBUG")
+
+log_msg(f"{len(devices_without_datasource)} devices did not have a config datasource")
+log_msg(f"Devices without a config datasource: {','.join(map(str, devices_without_datasource))}", "DEBUG")
+log_msg(f"{len(devices_without_instance)} devices did not have a config instance")
+log_msg(f"Devices without a config instance: {','.join(map(str, devices_without_instance))}", "DEBUG")
+
